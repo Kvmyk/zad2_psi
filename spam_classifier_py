@@ -1,0 +1,433 @@
+import pandas as pd
+import numpy as np
+import re
+import matplotlib.pyplot as plt
+import seaborn as sns
+from wordcloud import WordCloud
+import warnings
+warnings.filterwarnings('ignore')
+
+# NLP libraries
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+
+# Sklearn libraries
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve
+)
+
+print("=" * 80)
+print("KLASYFIKATOR SPAM SMS - PROJEKT NLP")
+print("=" * 80)
+
+# ============================================================================
+# KROK 1: WCZYTANIE DANYCH
+# ============================================================================
+print("\n[KROK 1] Wczytywanie danych...")
+
+# Wczytaj dane SMS Spam
+# UWAGA: Zmień ścieżkę do pliku na swoją
+df = pd.read_csv('spam.csv', encoding='latin-1')
+
+# Dataset ma dziwną strukturę - usuń puste kolumny
+df = df[['v1', 'v2']]
+df.columns = ['label', 'message']
+
+print(f"✓ Wczytano {len(df)} wiadomości SMS")
+print(f"\nRozkład klas:")
+print(df['label'].value_counts())
+print(f"\nPrzykładowe dane:")
+print(df.head())
+
+# ============================================================================
+# KROK 2: EKSPLORACJA DANYCH
+# ============================================================================
+print("\n[KROK 2] Eksploracja danych...")
+
+# Dodaj dodatkowe cechy
+df['length'] = df['message'].apply(len)
+df['num_words'] = df['message'].apply(lambda x: len(x.split()))
+
+print(f"\nStatystyki długości wiadomości:")
+print(df.groupby('label')[['length', 'num_words']].describe())
+
+# Konwersja etykiet na binarne (0 = ham, 1 = spam)
+df['label_binary'] = df['label'].map({'ham': 0, 'spam': 1})
+
+# ============================================================================
+# KROK 3: PREPROCESSING - CZYSZCZENIE TEKSTU
+# ============================================================================
+print("\n[KROK 3] Preprocessing - czyszczenie tekstu...")
+
+# Inicjalizacja narzędzi NLP
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
+
+
+def preprocess_text(text):
+    """
+    Funkcja do przetwarzania tekstu:
+    1. Konwersja na małe litery
+    2. Usunięcie znaków specjalnych i cyfr
+    3. Tokenizacja
+    4. Usunięcie stopwords
+    5. Lematyzacja
+    """
+    # Małe litery
+    text = text.lower()
+
+    # Usunięcie znaków specjalnych i cyfr
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+
+    # Tokenizacja
+    tokens = word_tokenize(text)
+
+    # Usunięcie stopwords i lematyzacja
+    tokens = [
+        lemmatizer.lemmatize(word)
+        for word in tokens
+        if word not in stop_words and len(word) > 2
+    ]
+
+    return ' '.join(tokens)
+
+
+# Zastosuj preprocessing
+print("Przetwarzanie tekstów...")
+df['processed_message'] = df['message'].apply(preprocess_text)
+
+print(f"\nPrzykład przed i po preprocessingu:")
+print(f"ORYGINAŁ: {df['message'].iloc[0]}")
+print(f"PRZETWORZONE: {df['processed_message'].iloc[0]}")
+
+# ============================================================================
+# KROK 4: REPREZENTACJA TEKSTU
+# ============================================================================
+print("\n[KROK 4] Tworzenie reprezentacji tekstu...")
+
+# Przygotowanie danych
+X = df['processed_message']
+y = df['label_binary']
+
+# Podział na zbiór treningowy i testowy
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+print(f"✓ Zbiór treningowy: {len(X_train)} próbek")
+print(f"✓ Zbiór testowy: {len(X_test)} próbek")
+
+# 4.1 Bag of Words (BoW)
+print("\n[4.1] Bag of Words...")
+bow_vectorizer = CountVectorizer(max_features=3000)
+X_train_bow = bow_vectorizer.fit_transform(X_train)
+X_test_bow = bow_vectorizer.transform(X_test)
+print(f"✓ BoW - wymiar: {X_train_bow.shape}")
+
+# 4.2 TF-IDF
+print("\n[4.2] TF-IDF...")
+tfidf_vectorizer = TfidfVectorizer(max_features=3000)
+X_train_tfidf = tfidf_vectorizer.fit_transform(X_train)
+X_test_tfidf = tfidf_vectorizer.transform(X_test)
+print(f"✓ TF-IDF - wymiar: {X_train_tfidf.shape}")
+
+# ============================================================================
+# KROK 5: KLASYFIKACJA - TRENING MODELI
+# ============================================================================
+print("\n[KROK 5] Trening modeli klasyfikacji...")
+
+# Słownik do przechowywania wyników
+results = {}
+
+
+def train_and_evaluate(name, model, X_train, X_test, y_train, y_test):
+    """Trenuje model i zwraca metryki"""
+    print(f"\n  Trenowanie: {name}...")
+
+    # Trening
+    model.fit(X_train, y_train)
+
+    # Predykcja
+    y_pred = model.predict(X_test)
+    y_pred_proba = (
+        model.predict_proba(X_test)[:, 1]
+        if hasattr(model, 'predict_proba')
+        else y_pred
+    )
+
+    # Metryki
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+
+    try:
+        auc = roc_auc_score(y_test, y_pred_proba)
+    except:
+        auc = 0
+
+    print(f"  ✓ Accuracy: {accuracy:.4f}")
+
+    return {
+        'model': model,
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'auc': auc,
+        'y_pred': y_pred,
+        'y_pred_proba': y_pred_proba,
+    }
+
+
+# Modele do przetestowania
+models = {
+    'Naive Bayes': MultinomialNB(),
+    'SVM Linear': SVC(kernel='linear', probability=True, random_state=42),
+    'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+    'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42),
+}
+
+# Testuj z różnymi reprezentacjami
+print("\n=== TESTOWANIE Z BAG OF WORDS ===")
+results['BoW'] = {}
+for name, model in models.items():
+    results['BoW'][name] = train_and_evaluate(
+        name, model, X_train_bow, X_test_bow, y_train, y_test
+    )
+
+print("\n=== TESTOWANIE Z TF-IDF ===")
+results['TF-IDF'] = {}
+for name, model in models.items():
+    results['TF-IDF'][name] = train_and_evaluate(
+        name, model, X_train_tfidf, X_test_tfidf, y_train, y_test
+    )
+
+# ============================================================================
+# KROK 6: EWALUACJA I PORÓWNANIE
+# ============================================================================
+print("\n" + "=" * 80)
+print("[KROK 6] EWALUACJA I PORÓWNANIE WYNIKÓW")
+print("=" * 80)
+
+# Stwórz DataFrame z wynikami
+results_data = []
+for vectorizer in ['BoW', 'TF-IDF']:
+    for model_name in models.keys():
+        r = results[vectorizer][model_name]
+        results_data.append(
+            {
+                'Vectorizer': vectorizer,
+                'Model': model_name,
+                'Accuracy': r['accuracy'],
+                'Precision': r['precision'],
+                'Recall': r['recall'],
+                'F1-Score': r['f1'],
+                'AUC': r['auc'],
+            }
+        )
+
+results_df = pd.DataFrame(results_data)
+print("\n📊 TABELA WYNIKÓW:\n")
+print(results_df.to_string(index=False))
+
+# Znajdź najlepszy model
+best_idx = results_df['F1-Score'].idxmax()
+best_result = results_df.iloc[best_idx]
+print(f"\n🏆 NAJLEPSZY MODEL:")
+print(f"   {best_result['Model']} z {best_result['Vectorizer']}")
+print(f"   F1-Score: {best_result['F1-Score']:.4f}")
+print(f"   Accuracy: {best_result['Accuracy']:.4f}")
+
+# Szczegółowy raport dla najlepszego modelu
+print(f"\n📋 SZCZEGÓŁOWY RAPORT - {best_result['Model']} ({best_result['Vectorizer']}):")
+best_vectorizer = best_result['Vectorizer']
+best_model_name = best_result['Model']
+best_y_pred = results[best_vectorizer][best_model_name]['y_pred']
+
+print("\nClassification Report:")
+print(
+    classification_report(
+        y_test, best_y_pred, target_names=['Ham', 'Spam'], digits=4
+    )
+)
+
+print("\nConfusion Matrix:")
+cm = confusion_matrix(y_test, best_y_pred)
+print(cm)
+print(f"\nTrue Negatives (TN): {cm[0,0]} - Poprawnie sklasyfikowane Ham")
+print(f"False Positives (FP): {cm[0,1]} - Ham błędnie jako Spam")
+print(f"False Negatives (FN): {cm[1,0]} - Spam błędnie jako Ham")
+print(f"True Positives (TP): {cm[1,1]} - Poprawnie sklasyfikowane Spam")
+
+# ============================================================================
+# KROK 7: WIZUALIZACJE
+# ============================================================================
+print("\n[KROK 7] Tworzenie wizualizacji...")
+
+# Ustawienia plotów
+plt.style.use('seaborn-v0_8-darkgrid')
+fig = plt.figure(figsize=(18, 12))
+
+# 7.1 Porównanie dokładności modeli
+ax1 = plt.subplot(2, 3, 1)
+pivot_acc = results_df.pivot(
+    index='Model', columns='Vectorizer', values='Accuracy'
+)
+pivot_acc.plot(kind='bar', ax=ax1, rot=45)
+ax1.set_title('Porównanie Accuracy', fontsize=14, fontweight='bold')
+ax1.set_ylabel('Accuracy')
+ax1.set_ylim([0.9, 1.0])
+ax1.legend(title='Vectorizer')
+ax1.grid(axis='y', alpha=0.3)
+
+# 7.2 Porównanie F1-Score
+ax2 = plt.subplot(2, 3, 2)
+pivot_f1 = results_df.pivot(index='Model', columns='Vectorizer', values='F1-Score')
+pivot_f1.plot(kind='bar', ax=ax2, rot=45, color=['#2ecc71', '#e74c3c'])
+ax2.set_title('Porównanie F1-Score', fontsize=14, fontweight='bold')
+ax2.set_ylabel('F1-Score')
+ax2.set_ylim([0.9, 1.0])
+ax2.legend(title='Vectorizer')
+ax2.grid(axis='y', alpha=0.3)
+
+# 7.3 Confusion Matrix dla najlepszego modelu
+ax3 = plt.subplot(2, 3, 3)
+sns.heatmap(
+    cm,
+    annot=True,
+    fmt='d',
+    cmap='Blues',
+    xticklabels=['Ham', 'Spam'],
+    yticklabels=['Ham', 'Spam'],
+    ax=ax3,
+)
+ax3.set_title(
+    f'Confusion Matrix\n{best_model_name} ({best_vectorizer})',
+    fontsize=14,
+    fontweight='bold',
+)
+ax3.set_ylabel('Prawdziwa klasa')
+ax3.set_xlabel('Predykcja')
+
+# 7.4 Rozkład długości wiadomości
+ax4 = plt.subplot(2, 3, 4)
+df[df['label'] == 'ham']['length'].hist(bins=50, alpha=0.6, label='Ham', ax=ax4)
+df[df['label'] == 'spam']['length'].hist(
+    bins=50, alpha=0.6, label='Spam', color='red', ax=ax4
+)
+ax4.set_title('Rozkład długości wiadomości', fontsize=14, fontweight='bold')
+ax4.set_xlabel('Długość znakowa')
+ax4.set_ylabel('Liczba wiadomości')
+ax4.legend()
+ax4.grid(axis='y', alpha=0.3)
+
+# 7.5 Mapa ciepła wszystkich metryk
+ax5 = plt.subplot(2, 3, 5)
+metrics_pivot = results_df.set_index(['Vectorizer', 'Model'])[
+    ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+]
+sns.heatmap(metrics_pivot, annot=True, fmt='.3f', cmap='YlGnBu', ax=ax5, cbar=True)
+ax5.set_title('Wszystkie metryki - Mapa ciepła', fontsize=14, fontweight='bold')
+
+# 7.6 Porównanie Precision vs Recall
+ax6 = plt.subplot(2, 3, 6)
+for vectorizer in ['BoW', 'TF-IDF']:
+    subset = results_df[results_df['Vectorizer'] == vectorizer]
+    ax6.scatter(
+        subset['Recall'],
+        subset['Precision'],
+        s=200,
+        alpha=0.6,
+        label=vectorizer,
+    )
+    for idx, row in subset.iterrows():
+        ax6.annotate(
+            row['Model'][:10],
+            (row['Recall'], row['Precision']),
+            fontsize=8,
+            ha='center',
+        )
+ax6.set_title('Precision vs Recall', fontsize=14, fontweight='bold')
+ax6.set_xlabel('Recall')
+ax6.set_ylabel('Precision')
+ax6.legend()
+ax6.grid(True, alpha=0.3)
+ax6.set_xlim([0.9, 1.0])
+ax6.set_ylim([0.9, 1.0])
+
+plt.tight_layout()
+plt.savefig('spam_classification_results.png', dpi=300, bbox_inches='tight')
+print("✓ Wykres zapisany jako 'spam_classification_results.png'")
+plt.show()
+
+# ============================================================================
+# KROK 8: TEST INTERAKTYWNY
+# ============================================================================
+print("\n" + "=" * 80)
+print("[KROK 8] TEST INTERAKTYWNY")
+print("=" * 80)
+
+# Użyj najlepszego modelu do predykcji
+if best_vectorizer == 'BoW':
+    best_model = results['BoW'][best_model_name]['model']
+    vectorizer = bow_vectorizer
+else:
+    best_model = results['TF-IDF'][best_model_name]['model']
+    vectorizer = tfidf_vectorizer
+
+
+def predict_message(message):
+    """Funkcja do predykcji nowej wiadomości"""
+    # Preprocessing
+    processed = preprocess_text(message)
+    # Wektoryzacja
+    vectorized = vectorizer.transform([processed])
+    # Predykcja
+    prediction = best_model.predict(vectorized)[0]
+    proba = (
+        best_model.predict_proba(vectorized)[0]
+        if hasattr(best_model, 'predict_proba')
+        else [0.5, 0.5]
+    )
+
+    result = "SPAM" if prediction == 1 else "HAM"
+    confidence = proba[prediction] * 100
+
+    return result, confidence
+
+
+# Przykładowe testy
+test_messages = [
+    "Hi, how are you doing today?",
+    "WINNER!! You have won a $1000 prize! Call now!",
+    "Can we meet tomorrow for lunch?",
+    "Congratulations! You've been selected for a FREE vacation. Click here!",
+    "Hey, are you free this weekend?",
+]
+
+print("\n📧 Testowanie wiadomości:\n")
+for i, msg in enumerate(test_messages, 1):
+    result, confidence = predict_message(msg)
+    print(f"{i}. MESSAGE: {msg}")
+    print(f"   PREDYKCJA: {result} (pewność: {confidence:.2f}%)")
+    print()
+
+print("=" * 80)
+print("✓ PROGRAM ZAKOŃCZONY POMYŚLNIE!")
+print("=" * 80)
